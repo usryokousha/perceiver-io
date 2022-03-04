@@ -3,7 +3,9 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange, repeat
+import numpy as np
 
 
 class InputAdapter(nn.Module):
@@ -83,7 +85,7 @@ class ImageInputAdapter(InputAdapter):
         frequency_grids = []
 
         for i, frequencies_i in enumerate(frequencies):
-            frequency_grids.append(p[..., i : i + 1] * frequencies_i[None, ...])
+            frequency_grids.append(p[..., i: i + 1] * frequencies_i[None, ...])
 
         if include_positions:
             encodings.append(p)
@@ -134,12 +136,12 @@ class TextInputAdapter(InputAdapter):
 
 
 class ClassificationOutputAdapter(OutputAdapter):
-    def __init__(self, num_classes: int, num_outputs: int = 1, num_output_channels: Optional[int] = None):
+    def __init__(self, num_classes: int, num_output_channels: Optional[int] = None):
 
         if num_output_channels is None:
             num_output_channels = num_classes
 
-        super().__init__(output_shape=(num_outputs, num_output_channels))
+        super().__init__(output_shape=(num_classes,))
         self.linear = nn.Linear(num_output_channels, num_classes)
 
     def forward(self, x):
@@ -149,3 +151,30 @@ class ClassificationOutputAdapter(OutputAdapter):
 class TextOutputAdapter(ClassificationOutputAdapter):
     def __init__(self, vocab_size: int, max_seq_len: int, num_output_channels: Optional[int] = None):
         super().__init__(num_classes=vocab_size, num_outputs=max_seq_len, num_output_channels=num_output_channels)
+
+
+class UpsampleOutputAdapter(OutputAdapter):
+    def __init__(self, input_shape: tuple, output_channels: int, upsample_factor: int = 1):
+        output_shape = (output_channels,) + tuple(i * upsample_factor for i in input_shape[:-1])
+        super().__init__(output_shape)
+        self._input_shape = input_shape
+        num_layers = int(math.log2(upsample_factor))
+
+        self.layers = nn.ModuleList()
+        for i in range(num_layers):
+            self.layers.append(nn.ConvTranspose2d(
+                in_channels=input_shape[-1]*2 if i > 0 else input_shape[-1],
+                out_channels=input_shape[-1]*2 if i < num_layers-1 else output_channels,
+                kernel_size=3,
+                stride=2,
+                padding=1
+            ))
+
+    def forward(self, x):
+        x = rearrange(x, "b (...) c -> b (h w) c",
+                      h=self._input_shape[-2], w=self._input_shape[-1])
+        for i, layer in enumerate(self.layers):
+            x = layer(x)
+            if i < len(self.layers)-1:
+                x = F.relu(x)
+        return x
